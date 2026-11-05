@@ -4,22 +4,20 @@ app.py
 Interactive Streamlit Academic Dashboard:
 Space-Time Trade-off in Planar Graph Topology (Pointer DCEL vs. Compact Array AHF/CHE).
 
-Project Framing (Cost-Model Story):
------------------------------------
-Pointer DCEL vs Compact Array DCEL has IDENTICAL asymptotics in the RAM model
-(Theta(V+E+F) space, O(k)/O(d) traversal). The contribution is a cost-model story:
-a ~7x smaller constant, plus a very different cost in the memory-hierarchy (I/O) model:
-a pointer walk costs Theta(k) cache misses, a contiguous walk costs Theta(1 + k/B).
-Never claim a big-O reduction.
+Project Framing (Theoretical & Empirical Cost Model):
+---------------------------------------------------
+Pointer DCEL vs Compact Array DCEL has identical asymptotic bounds in the standard RAM model:
+Theta(V+E+F) space, O(k) face traversal, O(d) vertex star traversal.
+The scientific contribution is a rigorous data-structural cost model:
+compact 1D flat arrays eliminate Python object overheads, pointer indirection,
+and redundant topology fields via closed-form modulo-3 arithmetic (Lage et al. 2005)
+and parallel indexing (Garimella et al. 2013), achieving ~85-93% empirical RAM reduction.
 
 Tabs:
 1. 🔍 Small-Scale Visualization: Interactive planar topology, face walks, and vertex star proofs.
 2. 📈 Performance Analytics: Memory and latency profiling across 3 layouts (Pointer, 5-Array, 2-Array Minimal).
 3. 📐 Theory vs Measurement: Mathematical derivation from Euler's formula and finite-size boundary correction.
-4. 🔬 Memory Lens: Interactive memory strip (64 B cache cells) animation, index-jump heatmaps, and cache counters.
-5. ⚡ Layouts & Algorithms: Twin construction, dual BFS, Laplacian smoothing, and C++ log-log scaling plot.
-6. ⚖️ Trade-offs: Honest engineering analysis of dynamic editing vs. static traversal.
-7. 📚 Literature & Theory: Foundational citations (Garimella 2013, Lage 2005, Salinas-Fernández 2023).
+4. ⚖️ Trade-offs & Analysis: Honest algorithmic analysis of dynamic editing vs. static traversal.
 
 Author: MSc Theoretical Computer Science (DAA Project)
 """
@@ -46,24 +44,11 @@ from dcel_core import (
     minimal_walk_face,
     minimal_get_vertex_star,
     run_benchmarks,
-    compute_dual_bfs_order,
-    compute_hilbert_order,
-    renumber_compact_mesh,
-    compute_index_jumps,
     PointerDCEL,
     CompactDCEL,
     MinimalCHE,
 )
-from analysis_model import predicted_reduction, measure_object_sizes
-from cache_sim import SimpleLRUCache, fragment_heap, simulate_vertex_star_traversal, simulate_face_traversal
-from algos import (
-    hash_twin_construction,
-    sort_twin_construction,
-    dual_bfs_pointer,
-    dual_bfs_compact,
-    laplacian_smoothing_pointer,
-    laplacian_smoothing_compact,
-)
+from analysis_model import predicted_reduction
 
 
 # ============================================================================
@@ -149,8 +134,8 @@ st.markdown(
 # ============================================================================
 
 @st.cache_data(show_spinner=True)
-def get_cached_benchmarks(sizes_tuple: Tuple[int, ...]) -> Dict[str, Any]:
-    return run_benchmarks(list(sizes_tuple), runs=3)
+def get_cached_benchmarks(sizes_tuple: Tuple[int, ...], runs: int = 3) -> Dict[str, Any]:
+    return run_benchmarks(list(sizes_tuple), runs=runs)
 
 
 @st.cache_data(show_spinner=True)
@@ -193,33 +178,57 @@ st.sidebar.caption(f"Small Graph Nodes: **{total_small_nodes}** (Safety Limit: �
 st.sidebar.divider()
 
 st.sidebar.subheader("Benchmarking Parameters")
-bench_option = st.sidebar.selectbox(
-    "Benchmark Graph Scales",
-    options=["Standard Suite (500, 2000, 5000)", "Extended Suite (250, 500, 1000, 2500, 5000)", "Quick Suite (300, 1000)"],
-    index=0
+bench_preset = st.sidebar.selectbox(
+    "Graph Scale Preset",
+    options=["Standard Suite (500, 2000, 5000)", "Extended Suite (250, 500, 1000, 2500, 5000)", "Quick Suite (300, 1000)", "Custom Selection"],
+    index=0,
+    help="Select a benchmark scale preset or define custom vertex counts."
 )
 
-if bench_option == "Standard Suite (500, 2000, 5000)":
-    benchmark_sizes = (500, 2000, 5000)
-elif bench_option == "Extended Suite (250, 500, 1000, 2500, 5000)":
-    benchmark_sizes = (250, 500, 1000, 2500, 5000)
+if bench_preset == "Standard Suite (500, 2000, 5000)":
+    default_sizes = [500, 2000, 5000]
+elif bench_preset == "Extended Suite (250, 500, 1000, 2500, 5000)":
+    default_sizes = [250, 500, 1000, 2500, 5000]
+elif bench_preset == "Quick Suite (300, 1000)":
+    default_sizes = [300, 1000]
 else:
-    benchmark_sizes = (300, 1000)
+    default_sizes = [500, 2000]
+
+selected_sizes = st.sidebar.multiselect(
+    "Benchmark Graph Scales (|V|)",
+    options=[100, 200, 250, 300, 500, 800, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 7500],
+    default=default_sizes,
+    help="Add or remove specific mesh vertex counts to benchmark live."
+)
+
+if not selected_sizes:
+    selected_sizes = [500, 2000]
+
+timing_runs = st.sidebar.slider(
+    "Benchmark Timing Runs",
+    min_value=1,
+    max_value=5,
+    value=3,
+    step=1,
+    help="Number of traversal repetitions averaged for runtime speed measurement."
+)
+
+benchmark_sizes = tuple(sorted(selected_sizes))
+
+if st.sidebar.button("🔄 Force Re-run Benchmarks", help="Clears cache and forces immediate re-computation"):
+    st.cache_data.clear()
+    st.rerun()
 
 
 # ============================================================================
-# TABULAR INTERFACE: 8 COMPREHENSIVE TABS
+# TABULAR INTERFACE: 4 FOCUSED TABS
 # ============================================================================
 
-tab_viz, tab_perf, tab_theory, tab_lens, tab_algos, tab_cpp, tab_tradeoffs, tab_lit = st.tabs([
+tab_viz, tab_perf, tab_theory, tab_tradeoffs = st.tabs([
     "🔍 Small-Scale Visualization",
     "📈 Performance Analytics",
     "📐 Theory vs Measurement",
-    "🔬 Memory Lens",
-    "⚡ Layouts & Algorithms",
-    "💻 C++17 Hardware Benchmark",
-    "⚖️ Trade-offs",
-    "📚 Literature & Theory"
+    "⚖️ Trade-offs & Analysis"
 ])
 
 
@@ -350,8 +359,13 @@ with tab_perf:
         """
     )
 
-    with st.spinner("Retrieving cached benchmark profiling data..."):
-        benchmarks_data = get_cached_benchmarks(benchmark_sizes)
+    st.info(
+        f"⚙️ **Active Benchmark Configuration:** Evaluating **{len(benchmark_sizes)}** graph scales: "
+        f"`{list(benchmark_sizes)}` with **{timing_runs}** timing runs per layout."
+    )
+
+    with st.spinner(f"Running benchmarks for sizes {list(benchmark_sizes)}..."):
+        benchmarks_data = get_cached_benchmarks(benchmark_sizes, runs=timing_runs)
 
     records = benchmarks_data["records"]
     df_bench = pd.DataFrame(records)
@@ -446,259 +460,33 @@ with tab_theory:
 
 
 # ============================================================================
-# TAB 4: MEMORY LENS (PHASE 3 & 4 INTERACTIVE ANIMATION)
-# ============================================================================
-
-with tab_lens:
-    st.markdown("### Memory Lens: Spatial Locality & Cache Line Simulation")
-    st.markdown(
-        """
-        Visualize how memory access patterns directly influence CPU cache line utilization.
-        In the **Fragmented Pointer Layout**, hops jump across scattered heap memory addresses.
-        In the **Compact Array Layout**, lookups are tightly packed into consecutive 64-byte cache lines.
-        """
-    )
-
-    lens_grid_size = st.slider("Select Lens Grid Dimension (N = r x r)", min_value=3, max_value=6, value=4, step=1)
-    lens_dcel = generate_grid_graph(lens_grid_size, lens_grid_size)
-    lens_frag = fragment_heap(lens_dcel, seed=42)
-    lens_compact = encode_to_compact(lens_dcel)
-
-    lens_v = st.selectbox("Inspect Vertex Star for Vertex:", options=[v.id for v in lens_dcel.vertices], index=min(5, lens_dcel.num_vertices - 1))
-
-    # Collect address sequence for pointer and compact
-    star_edges_ptr = get_vertex_star(lens_frag.vertices[lens_v])
-    ptr_addrs = []
-    for eid in star_edges_ptr:
-        he = lens_frag.half_edges[eid]
-        ptr_addrs.extend([id(he), id(he.twin), id(he.twin.next)])
-
-    tw_buf = lens_compact.twin.buffer_info()[0]
-    nx_buf = lens_compact.next.buffer_info()[0]
-    star_edges_cmp = compact_get_vertex_star(lens_compact, lens_v)
-    cmp_addrs = []
-    for eid in star_edges_cmp:
-        cmp_addrs.extend([tw_buf + 4 * eid, nx_buf + 4 * lens_compact.twin[eid]])
-
-    total_steps = max(len(ptr_addrs), len(cmp_addrs))
-
-    step_col, anim_col = st.columns([0.7, 0.3])
-    with step_col:
-        step_idx = st.slider("Step through Vertex Star Orbit:", min_value=1, max_value=total_steps, value=total_steps)
-    with anim_col:
-        st.write("")
-        st.write("")
-        play_btn = st.button("▶ Play Orbit Animation")
-
-    # Animation container
-    anim_placeholder = st.empty()
-
-    def render_memory_grid(current_step: int):
-        sub_ptr = ptr_addrs[:current_step]
-        sub_cmp = cmp_addrs[:current_step]
-
-        # Map addresses to 16x16 grid of 64 B cache line cells
-        ptr_cells = set((addr // 64) % 256 for addr in sub_ptr)
-        cmp_cells = set((addr // 64) % 256 for addr in sub_cmp)
-
-        fig_m, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 3.8), dpi=130)
-
-        # Draw 16x16 grid
-        def draw_grid(ax, active_cells, title, color):
-            grid = [[1 if (r * 16 + c) in active_cells else 0 for c in range(16)] for r in range(16)]
-            ax.imshow(grid, cmap=plt.matplotlib.colors.ListedColormap(["#f1f5f9", color]), vmin=0, vmax=1)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_title(title, fontsize=9.5, fontweight="bold", pad=8)
-
-        draw_grid(ax1, ptr_cells, f"Fragmented Pointer ({len(ptr_cells)} Cache Lines Touched)", "#dc2626")
-        draw_grid(ax2, cmp_cells, f"Compact Array ({len(cmp_cells)} Cache Lines Touched)", "#2563eb")
-        plt.tight_layout()
-        return fig_m
-
-    if play_btn:
-        for s in range(1, total_steps + 1):
-            f_anim = render_memory_grid(s)
-            anim_placeholder.pyplot(f_anim)
-            plt.close(f_anim)
-            time.sleep(0.12)
-    else:
-        f_stat = render_memory_grid(step_idx)
-        anim_placeholder.pyplot(f_stat)
-        plt.close(f_stat)
-
-    st.markdown("##### Index Jump Metrics (Original vs. BFS vs. Hilbert Renumbering)")
-    bfs_order = compute_dual_bfs_order(lens_compact)
-    cmp_bfs = renumber_compact_mesh(lens_compact, bfs_order)
-    hilbert_order = compute_hilbert_order(lens_compact)
-    cmp_hilbert = renumber_compact_mesh(lens_compact, hilbert_order)
-
-    jumps_orig = compute_index_jumps(lens_compact)
-    jumps_bfs = compute_index_jumps(cmp_bfs)
-    jumps_hilb = compute_index_jumps(cmp_hilbert)
-
-    jc1, jc2, jc3 = st.columns(3)
-    jc1.metric("Original Avg Twin Jump", f"{jumps_orig['avg_twin_jump']} edges")
-    jc2.metric("Dual BFS Avg Twin Jump", f"{jumps_bfs['avg_twin_jump']} edges", delta=f"{round(jumps_bfs['avg_twin_jump'] - jumps_orig['avg_twin_jump'], 2)}", delta_color="inverse")
-    jc3.metric("Hilbert Avg Twin Jump", f"{jumps_hilb['avg_twin_jump']} edges", delta=f"{round(jumps_hilb['avg_twin_jump'] - jumps_orig['avg_twin_jump'], 2)}", delta_color="inverse")
-
-
-# ============================================================================
-# TAB 5: DOWNSTREAM ALGORITHMS & DETERMINISM (PHASE 5)
-# ============================================================================
-
-with tab_algos:
-    st.markdown("### Algorithmic Benchmarks & Equivalence Proofs")
-
-    st.markdown("#### 1. Deterministic Twin Pairing: Hash-Based vs. Sort-Based")
-    st.markdown(
-        r"""
-        While Hash pairing achieves expected $O(H)$ time in the RAM model, Sort pairing achieves
-        $O(H \log H)$ using purely deterministic array operations without allocating dynamic hash tables.
-        Both methods yield $100\%$ bit-identical twin arrays across all mesh sizes.
-        """
-    )
-    twin_df = pd.DataFrame([
-        {"Vertices (|V|)": 992, "Half-Edges (|H|)": 5580, "Hash Time (ms)": 1.38, "Sort Time (ms)": 3.59, "Pairing Identical": "YES"},
-        {"Vertices (|V|)": 10000, "Half-Edges (|H|)": 58806, "Hash Time (ms)": 15.63, "Sort Time (ms)": 39.78, "Pairing Identical": "YES"},
-        {"Vertices (|V|)": 49952, "Half-Edges (|H|)": 297036, "Hash Time (ms)": 77.25, "Sort Time (ms)": 205.97, "Pairing Identical": "YES"},
-        {"Vertices (|V|)": 99856, "Half-Edges (|H|)": 595350, "Hash Time (ms)": 157.62, "Sort Time (ms)": 417.51, "Pairing Identical": "YES"},
-    ])
-    st.dataframe(twin_df, width="stretch", hide_index=True)
-
-    st.markdown("#### 2. Downstream Algorithm Equivalence (Dual BFS & Laplacian Smoothing)")
-    st.markdown(
-        r"""
-        Both Dual Graph BFS (face visitation order) and Laplacian Mesh Smoothing ($k=5$ iterations)
-        yield exact topological and floating-point coordinate equivalence ($\Delta_{\text{coord}} = 0.00$),
-        proving that Data-Oriented Design preserves complete geometric and algorithmic fidelity.
-        """
-    )
-    algo_df = pd.DataFrame([
-        {"Mesh Size (|V|)": 500, "Dual BFS Pointer (ms)": 1.82, "Dual BFS Compact (ms)": 0.44, "BFS Order Match": "100%", "Laplacian Max Error": "0.00e+00"},
-        {"Mesh Size (|V|)": 2000, "Dual BFS Pointer (ms)": 7.65, "Dual BFS Compact (ms)": 1.78, "BFS Order Match": "100%", "Laplacian Max Error": "0.00e+00"},
-        {"Mesh Size (|V|)": 5000, "Dual BFS Pointer (ms)": 19.41, "Dual BFS Compact (ms)": 4.52, "BFS Order Match": "100%", "Laplacian Max Error": "0.00e+00"},
-    ])
-    st.dataframe(algo_df, width="stretch", hide_index=True)
-
-
-# ============================================================================
-# TAB 6: COMPILED C++17 HARDWARE BENCHMARKS (PHASE 6)
-# ============================================================================
-
-with tab_cpp:
-    st.markdown("### Native Hardware Scaling: C++17 Benchmarks & Cache Inflection Points")
-    st.markdown(
-        r"""
-        To isolate architectural memory effects from CPython runtime overhead, we implemented identical
-        topologies in native C++17 (`cpp/bench.cpp`). We measure the exact nanoseconds per half-edge
-        traversal as mesh sizes scale past hardware CPU cache hierarchies ($L1 \approx 32\text{ KB}$, $L2 \approx 512\text{ KB}$, $L3 \approx 16\text{ MB}$).
-        """
-    )
-    if os.path.exists("figures/cpp_benchmark.png"):
-        st.image("figures/cpp_benchmark.png", caption="Figure: Traversal Latency across mesh scales. Notice the pointer chasing curve spiking from ~3.2 ns to 17.05 ns once data exceeds L2 cache, while Compact Arrays stay at ~1.48 ns (11.5x speedup).")
-    elif os.path.exists("cpp_results.csv"):
-        cpp_df = pd.read_csv("cpp_results.csv")
-        st.dataframe(cpp_df, width="stretch", hide_index=True)
-    else:
-        st.info("Run `bash cpp/run_cpp.sh` to generate compiled C++ benchmark curves.")
-
-    st.markdown("#### Hardware Latency Summary Table")
-    cpp_summary_df = pd.DataFrame([
-        {"Half-Edges (|H|)": "1,000", "Working Set": "48 KB (Fits in L1/L2)", "Pointer (ns/op)": 3.12, "5-Array Compact (ns/op)": 1.45, "2-Array CHE (ns/op)": 1.28, "Speedup": "2.4x"},
-        {"Half-Edges (|H|)": "10,000", "Working Set": "480 KB (Fits in L2)", "Pointer (ns/op)": 3.45, "5-Array Compact (ns/op)": 1.46, "2-Array CHE (ns/op)": 1.30, "Speedup": "2.7x"},
-        {"Half-Edges (|H|)": "100,000", "Working Set": "4.8 MB (Spills to L3)", "Pointer (ns/op)": 7.82, "5-Array Compact (ns/op)": 1.48, "2-Array CHE (ns/op)": 1.32, "Speedup": "5.9x"},
-        {"Half-Edges (|H|)": "1,000,000", "Working Set": "48 MB (Spills to DRAM)", "Pointer (ns/op)": 17.05, "5-Array Compact (ns/op)": 1.48, "2-Array CHE (ns/op)": 1.31, "Speedup": "11.5x"},
-    ])
-    st.dataframe(cpp_summary_df, width="stretch", hide_index=True)
-
-
-# ============================================================================
-# TAB 7: TRADE-OFFS & LIMITATIONS
+# TAB 4: TRADE-OFFS & ANALYSIS
 # ============================================================================
 
 with tab_tradeoffs:
-    st.markdown("### Engineering Trade-Offs: When Does Pointer DCEL Still Win?")
+    st.markdown("### Algorithmic & Structural Trade-Offs")
     st.markdown(
         r"""
-        In adherence to scientific rigor, we document the fundamental limitations and trade-offs
-        of Compact Array-Based representations:
+        In adherence to rigorous algorithm analysis, we document the fundamental limitations and trade-offs
+        of Compact Array-Based representations versus traditional Object-Oriented Pointer DCEL:
 
-        | Criterion | Object-Oriented Pointer DCEL | Compact Array DCEL (AHF/CHE) |
-        | :--- | :--- | :--- |
-        | **Memory Footprint** | Enormous (148 B/vertex + 116 B/half-edge) | **Minimal (148 B/V in 5-Array; 60 B/V in 2-Array)** |
-        | **Cache Line Efficiency** | Poor ($\Theta(k)$ cache line misses) | **Optimal ($\Theta(1 + k/B)$ stream prefetching)** |
-        | **Edge Flips** | $O(1)$ pointer rewiring | $O(1)$ integer array assignment |
-        | **Vertex / Face Insertion** | **$O(1)$ isolated heap allocation** | Requires amortized array reallocations or free-lists |
-        | **Entity Deletion** | **$O(1)$ isolated deallocation** | Leaves fragmentation holes; requires compaction passes |
-        | **Boundary Topology** | Arbitrary $n$-gon outer loops | Needs Ghost-Triangle coning (+1 ghost vertex) for CHE |
+        | Criterion | Object-Oriented Pointer DCEL (Muller & Preparata 1978) | Compact 5-Array DCEL (Garimella et al. 2013 AHF) | Minimal 2-Array CHE (Lage et al. 2005 CHE) |
+        | :--- | :--- | :--- | :--- |
+        | **Memory Model Footprint** | $\\Theta(V + E + F)$ with high constant ($\\approx 148\\text{ B}/V + 116\\text{ B}/H$) | $\\Theta(V + E + F)$ with reduced constant ($\\approx 148\\text{ B}/V$ total) | $\\Theta(V + E + F)$ with minimal constant ($\\approx 60\\text{ B}/V$ total) |
+        | **Memory Organization** | Fragmented dynamic heap allocations (pointers to objects) | Contiguous parallel 1D integer arrays | Contiguous 1D integer arrays (`twin`, `origin`) |
+        | **Next/Prev Navigation** | Explicit stored pointers (`e.next`, `e.prev`) | Explicit array lookup (`next_arr[e]`, `prev_arr[e]`) | Closed-form arithmetic (zero-cost mod 3 formulas) |
+        | **Edge Flips** | $O(1)$ pointer rewiring across affected objects | $O(1)$ array index assignment | $O(1)$ array index assignment |
+        | **Vertex / Face Insertion** | **$O(1)$ isolated heap allocation** | Amortized $O(1)$ array dynamic reallocation | Amortized $O(1)$ array dynamic reallocation |
+        | **Entity Deletion** | **$O(1)$ isolated deallocation** | Leaves index holes or requires compaction | Leaves index holes or requires compaction |
+        | **Arbitrary Polygons** | Arbitrary $n$-gon faces supported natively | Arbitrary $n$-gon faces supported | Purely triangular ($d=3$); polygons require triangulation |
+        | **Boundary Closure** | Single external boundary cycle | Explicit boundary half-edge cycle | Requires Ghost-Triangle closure to emulate 2-manifold |
 
-        > **Conclusion on Structural Fit:**
-        > * Use **Compact Array DCEL (AHF / CHE)** for: Static meshes, rendering pipelines, finite-element simulations,
-        >   large-scale GIS datasets, and read-heavy traversal workloads where memory bandwidth is the bottleneck.
-        > * Use **Pointer DCEL** for: Interactive geometric modeling, dynamic CAD topological surgery, Delaunay triangulation
-        >   incremental insertion, and workflows dominated by frequent structural topology mutations.
+        > **Algorithmic Fit Summary:**
+        > * **Compact Array DCEL (AHF / CHE):** Superior for static meshes, simulation meshes, GIS spatial queries, 
+        >   and traversal-dominated workloads where memory compactness is paramount.
+        > * **Pointer DCEL:** Optimal for interactive CAD geometric modeling, incremental Delaunay triangulation, 
+        >   and topological surgery requiring frequent node deletions and additions without bulk array shifting.
         """
     )
-
-
-# ============================================================================
-# TAB 8: ACADEMIC LITERATURE & THEORETICAL METHODOLOGIES
-# ============================================================================
-
-with tab_lit:
-    st.markdown("### Literature Foundations & Methodological Lineage")
-
-    st.markdown('<div class="citation-box">', unsafe_allow_html=True)
-    st.markdown(
-        """
-        **1. Garimella, R. V., Kim, J., & Berndt, M. (2013).**
-        *"An Array-based Half-Facet (AHF) mesh data structure: a lightweight and scalable representation for polyhedral meshes."*
-        *Journal of Computational Physics*, 258, 260–280.
-        """
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown(
-        """
-        * **AHF Core Concept:** Replaces entity heap objects with parallel 1D integer arrays where the half-edge
-          ID directly serves as the array index.
-        * **Empirical Verification:** Implemented in `CompactDCEL` (5-array layout), achieving **~86% RAM reduction**
-          over Pointer DCEL.
-        """
-    )
-
-    st.markdown('<div class="citation-box">', unsafe_allow_html=True)
-    st.markdown(
-        """
-        **2. Lage, M., Petronetto, F., Paiva, A., Lopes, H., Lewiner, T., & Velho, L. (2005).**
-        *"CHE: A Compact Half-Edge data structure for triangle meshes."*
-        *SIBGRAPI 2005 (18th Brazilian Symposium on Computer Graphics and Image Processing)*, 217–224.
-        """
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown(
-        """
-        * **CHE Core Concept:** Encodes `next`, `prev`, and `face` via closed-form integer arithmetic,
-          storing strictly `twin` and `origin` arrays (8 bytes per half-edge).
-        * **Ghost Triangle Extension:** Cones boundary edges to a ghost vertex, achieving **~91% to 94% RAM reduction**.
-        """
-    )
-
-    st.markdown('<div class="citation-box">', unsafe_allow_html=True)
-    st.markdown(
-        """
-        **3. Salinas-Fernández, J. A., et al. (2023).**
-        *"A Survey on Compact and Succinct Data Structures for Meshes."*
-        *ACM Computing Surveys*, 55(11), 1–38.
-        """
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown(
-        """
-        * **Empirical Target Metric:** Validated the empirical 80–90% RAM reduction envelope across
-          multi-scale planar and surface meshes.
-        """
-    )
-
     st.markdown("---")
-    st.caption("MSc Theoretical Computer Science | Academic Project Artifact | Conforming to Data-Oriented Design (DOD).")
+    st.caption("MSc Theoretical Computer Science | Academic Project Artifact | Design and Analysis of Algorithms")
